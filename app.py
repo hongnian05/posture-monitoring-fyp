@@ -90,6 +90,9 @@ class UniversalPoseDetector:
             options = vision.PoseLandmarkerOptions(
                 base_options=base_options,
                 output_segmentation_masks=False,
+                min_pose_detection_confidence=0.35,
+                min_pose_presence_confidence=0.35,
+                min_tracking_confidence=0.35,
             )
             self.detector = vision.PoseLandmarker.create_from_options(options)
             self.is_tasks = True

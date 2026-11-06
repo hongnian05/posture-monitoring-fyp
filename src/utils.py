@@ -91,8 +91,10 @@ def get_alert_audio_b64(
 # =============================================================================
 
 def _lm_to_px(lm: Any, w: int, h: int) -> tuple[int, int]:
-    """Convert a normalised MediaPipe landmark to pixel coordinates."""
-    return (int(lm.x * w), int(lm.y * h))
+    """Convert a normalised MediaPipe landmark to pixel coordinates safely clamped within frame."""
+    x = int(max(0.0, min(1.0, lm.x)) * w)
+    y = int(max(0.0, min(1.0, lm.y)) * h)
+    return (x, y)
 
 
 def draw_hud(
