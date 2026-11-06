@@ -17,12 +17,14 @@ Features
   • FPS counter rendered on the HUD.
   • Visual (red border flash) + audio (sine-wave beep) alert when bad
     posture is detected continuously for >= ALERT_THRESHOLD_S seconds.
+  • Persistent session detection & alert event logging (CSV exportable).
   • Sidebar controls: webcam index, alert threshold, confidence display.
 """
 
 from __future__ import annotations
 
 import base64
+import importlib
 import sys
 import time
 from collections import deque
@@ -32,6 +34,7 @@ import cv2
 import joblib
 import mediapipe as mp
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 # ── Project path resolution ──────────────────────────────────────────────────
@@ -39,13 +42,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import importlib
 import src.features as features_mod
+import src.logger as logger_mod
 import src.utils as utils_mod
+
 importlib.reload(features_mod)
 importlib.reload(utils_mod)
+importlib.reload(logger_mod)
 
 from src.features import extract_features, feature_dict_to_df
+from src.logger import PostureLogger
 from src.utils import CLASS_COLOURS, draw_hud, get_alert_audio_b64
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -162,6 +168,7 @@ def build_sidebar() -> dict:
         help="Alert fires when bad posture is maintained continuously for this long.",
     )
     show_confidence = st.sidebar.checkbox("Show Class Probabilities", value=True)
+    enable_logging  = st.sidebar.checkbox("Enable Telemetry Logging", value=True)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🎯 Target Posture Classes")
@@ -180,7 +187,54 @@ def build_sidebar() -> dict:
         "cam_index":        int(cam_index),
         "threshold_s":      float(threshold_s),
         "show_confidence":  show_confidence,
+        "enable_logging":   enable_logging,
     }
+
+
+# ── Render Analytics Section ─────────────────────────────────────────────────
+def render_analytics(logger: PostureLogger) -> None:
+    """Render session analytics cards and downloadable CSV tables."""
+    st.markdown("---")
+    st.subheader("📋 Session Posture Analytics & Data Logs")
+
+    stats = logger.get_session_stats()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Good Posture Time", f"{stats['good_posture_pct']:.1f}%")
+    m2.metric("Bad Posture Time", f"{stats['bad_posture_pct']:.1f}%")
+    m3.metric("Total Alerts Fired", f"{stats['total_alerts']}")
+    m4.metric("Logged Telemetry Samples", f"{stats['total_samples']}")
+
+    col_l1, col_l2 = st.columns(2)
+    alert_df = logger.get_alerts_df()
+    det_df = logger.get_detections_df()
+
+    with col_l1:
+        st.markdown("#### 🚨 Alert Trigger Events Log")
+        if not alert_df.empty:
+            st.dataframe(alert_df.tail(20), use_container_width=True, height=220)
+            st.download_button(
+                "📥 Download Alert Logs (CSV)",
+                data=alert_df.to_csv(index=False),
+                file_name="posture_alerts_log.csv",
+                mime="text/csv",
+                key="dl_alerts",
+            )
+        else:
+            st.info("No posture alerts triggered in this session yet.")
+
+    with col_l2:
+        st.markdown("#### 📈 Real-Time Telemetry Detections Log")
+        if not det_df.empty:
+            st.dataframe(det_df.tail(20), use_container_width=True, height=220)
+            st.download_button(
+                "📥 Download Detection Telemetry (CSV)",
+                data=det_df.to_csv(index=False),
+                file_name="posture_detections_log.csv",
+                mime="text/csv",
+                key="dl_detections",
+            )
+        else:
+            st.info("No telemetry data recorded yet. Start monitoring to collect logs.")
 
 
 # ── Main Application ─────────────────────────────────────────────────────────
@@ -188,10 +242,15 @@ def main() -> None:
     st.title("🧍 AI-Based Ergonomic Posture Monitor")
     st.markdown(
         "Real-time posture classification using **MediaPipe Pose** and **Random Forest (96.0% accuracy)**. "
-        "Processed strictly in-memory without storing video to disk."
+        "Processed strictly in-memory with automatic session data logging."
     )
 
     settings = build_sidebar()
+
+    # ── Initialize session logger ────────────────────────────────────────────
+    if "posture_logger" not in st.session_state:
+        st.session_state["posture_logger"] = PostureLogger()
+    logger: PostureLogger = st.session_state["posture_logger"]
 
     # ── Load ML Model & Pose Detector ────────────────────────────────────────
     model_data = load_model()
@@ -240,6 +299,9 @@ def main() -> None:
         label_placeholder.metric("Status", "Standby")
         fps_placeholder.metric("FPS", "--")
         alert_placeholder.success("System Ready (No Alert)")
+
+        # Render analytics history below
+        render_analytics(logger)
         return
 
     # ── Pre-generate alert audio (in-memory) ─────────────────────────────────
@@ -253,6 +315,7 @@ def main() -> None:
             "- If you are using an external camera, change **Webcam Index** to `1` or `2` in the sidebar.\n"
             "- Ensure no other application (Zoom, Teams, Camera app) is currently using the camera."
         )
+        render_analytics(logger)
         return
 
     # ── Frame loop state ─────────────────────────────────────────────────────
@@ -305,10 +368,30 @@ def main() -> None:
                 bad_posture_start = None
                 alert_active      = False
 
-            # Fire audio alert
+            # ── Alert Trigger & Logging ──────────────────────────────────────
+            confidence_pct = float(np.max(probas) * 100.0) if probas is not None else 0.0
+
             if alert_active and (t_now - last_alert_time) >= ALERT_COOLDOWN_S:
                 inject_audio_alert(alert_audio_b64)
                 last_alert_time = t_now
+                if settings["enable_logging"]:
+                    logger.log_alert(
+                        posture_label=posture_label,
+                        confidence_pct=confidence_pct,
+                        duration_exceeded_s=elapsed,
+                        angles=angles_dict,
+                    )
+
+            # Periodic telemetry log (~1 Hz)
+            if settings["enable_logging"] and posture_label != "Detecting...":
+                logger.log_detection(
+                    posture_label=posture_label,
+                    confidence_pct=confidence_pct,
+                    angles=angles_dict,
+                    alert_active=alert_active,
+                    current_time=t_now,
+                    interval_s=1.0,
+                )
 
             # ── FPS calculation ──────────────────────────────────────────────
             frame_times.append(t_now)
@@ -359,6 +442,7 @@ def main() -> None:
 
     finally:
         cap.release()
+        render_analytics(logger)
 
 
 if __name__ == "__main__":
