@@ -13,7 +13,7 @@ Prolonged computer use in non-ergonomic positions is a primary contributor to Wo
 |---|---|---|
 | **Classification Accuracy** | > 90.0% | **96.00%** |
 | **Throughput / Latency** | $\ge$ 30 FPS | Capable of real-time 30+ FPS stream |
-| **Alert Latency** | < 2.0 s continuous poor posture | Configurable (default: 2.0 s) |
+| **Alert Latency** | Configurable threshold | Default: **3.0 s** continuous poor posture |
 | **Privacy / Security** | In-memory frame processing only | No video or images stored on disk |
 
 ---

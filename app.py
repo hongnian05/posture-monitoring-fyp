@@ -59,7 +59,7 @@ MODEL_PATH          = PROJECT_ROOT / "posture_rf_model.pkl"
 POSE_TASK_PATH      = PROJECT_ROOT / "models" / "pose_landmarker_lite.task"
 GOOD_POSTURE_LABEL  = "Good Posture"
 DEFAULT_CAM_INDEX   = 0
-DEFAULT_THRESHOLD_S = 2.0        # seconds of bad posture before alert fires
+DEFAULT_THRESHOLD_S = 3.0        # seconds of bad posture before alert fires
 FRAME_BUFFER_LEN    = 10         # rolling window for FPS smoothing
 
 # ── Page config ──────────────────────────────────────────────────────────────
@@ -322,7 +322,7 @@ def main() -> None:
     frame_times: deque[float] = deque(maxlen=FRAME_BUFFER_LEN)
     bad_posture_start: float | None = None
     last_alert_time:   float        = 0.0
-    ALERT_COOLDOWN_S                = 2.0
+    ALERT_COOLDOWN_S                = 3.0
     posture_label                   = "Detecting..."
     angles_dict: dict | None        = None
     alert_active                    = False
