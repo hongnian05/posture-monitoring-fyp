@@ -1,11 +1,10 @@
 """
 src/features.py
 ===============
-MediaPipe landmark extraction and omnidirectional biomechanical feature engineering
-supporting BOTH front-facing (facing camera) and profile (side view) desk setups.
+MediaPipe landmark extraction and biomechanical feature engineering
+tailored for seated computer desk users.
 
 Landmarks used (MediaPipe Pose indices):
-  0  – Nose (fallback anchor)
   7  – Left ear
   8  – Right ear
  11  – Left shoulder
@@ -13,13 +12,12 @@ Landmarks used (MediaPipe Pose indices):
  23  – Left hip
  24  – Right hip
 
-Biomechanical 3D Angle Calculations:
-1. Neck Flexion (deg)       – Head alignment relative to shoulder girdle in 3D.
-                              Frontal/Side forward lean measured via sqrt(dx^2 + dz^2).
+Derived biomechanical angles:
+1. Neck Flexion (deg)       – Head alignment relative to shoulder girdle.
                               Upright ≈ 85°-90°; Forward tilt drops to 60°-75°.
-2. Trunk Inclination (deg)  – Torso inclination in 3D (sagittal plane + optical depth).
+2. Trunk Inclination (deg)  – Torso alignment relative to horizontal plane.
                               Upright ≈ 85°-90°; Slouching drops to 65°-78°.
-3. Shoulder Asymmetry (deg) – Elevation disparity between left and right shoulders.
+3. Shoulder Asymmetry (deg) – Elevation angle across the left & right shoulders.
                               Level ≈ 0°-2°; Asymmetric tilt reaches 8°-15°+.
 """
 
@@ -55,30 +53,17 @@ FEATURE_COLUMNS = [
 ]
 
 
-def _midpoint_3d(
-    a: tuple[float, float, float],
-    b: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    """Return the 3D midpoint (x, y, z) between two coordinate tuples."""
-    return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (a[2] + b[2]) / 2.0)
-
-
-def _angle_deg_3d(
-    vertical_span: float,
-    horizontal_span_x: float,
-    depth_span_z: float,
-    depth_weight: float = 1.35,
-) -> float:
+def _angle_deg(vertical_span: float, horizontal_span: float) -> float:
     """
-    Calculate angle in degrees relative to the horizontal plane (0° = horizontal, 90° = vertical upright).
-
-    Supports omnidirectional posture detection:
-      - horizontal_span_x: captures forward lean in side / profile view.
-      - depth_span_z: captures forward lean along camera depth in front-facing view.
-      - Total horizontal displacement = sqrt(dx^2 + (depth_weight * dz)^2).
+    Calculate angle in degrees relative to the horizontal axis (0 deg = horizontal, 90 deg = vertical).
+    For upright posture, vertical span >> horizontal span, yielding ~85°-90°.
     """
-    horizontal_disp = math.sqrt(horizontal_span_x ** 2 + (depth_span_z * depth_weight) ** 2)
-    return math.degrees(math.atan2(abs(vertical_span), horizontal_disp + 1e-6))
+    return math.degrees(math.atan2(abs(vertical_span), abs(horizontal_span) + 1e-6))
+
+
+def _midpoint(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    """Return the midpoint (x, y) between two coordinate tuples."""
+    return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
 
 
 # ── Core extraction ──────────────────────────────────────────────────────────
@@ -87,10 +72,8 @@ def extract_features(pose_landmarks: Any) -> dict[str, float] | None:
     """
     Extract biomechanical features from detected MediaPipe pose landmarks.
 
-    Omnidirectional design:
-      - Accurately captures slouching and forward head posture whether the user
-        is facing directly toward the webcam or sitting in side view.
-      - Gracefully handles desk occlusion using anatomical priors and depth estimation.
+    Designed for seated computer users where hips might be partially occluded
+    by a desk. Gracefully infers occluded landmarks instead of rejecting frames.
 
     Parameters
     ----------
@@ -128,12 +111,9 @@ def extract_features(pose_landmarks: Any) -> dict[str, float] | None:
     if vis_ls < 0.2 and vis_rs < 0.2:
         return None
 
-    ls_z = float(getattr(ls, "z", 0.0) or 0.0)
-    rs_z = float(getattr(rs, "z", 0.0) or 0.0)
-
-    left_shoulder  = (float(ls.x), float(ls.y), ls_z)
-    right_shoulder = (float(rs.x), float(rs.y), rs_z)
-    shoulder_mid   = _midpoint_3d(left_shoulder, right_shoulder)
+    left_shoulder  = (ls.x, ls.y)
+    right_shoulder = (rs.x, rs.y)
+    shoulder_mid   = _midpoint(left_shoulder, right_shoulder)
 
     # ── 2. Head / Ears (With nose fallback if ears occluded) ─────────────────
     le = lm[LM_LEFT_EAR] if len(lm) > LM_LEFT_EAR else None
@@ -144,82 +124,67 @@ def extract_features(pose_landmarks: Any) -> dict[str, float] | None:
     vis_le = 1.0 if vis_le is None else vis_le
     vis_re = 1.0 if vis_re is None else vis_re
 
-    le_z = float(getattr(le, "z", shoulder_mid[2]) or shoulder_mid[2]) if le else shoulder_mid[2]
-    re_z = float(getattr(re, "z", shoulder_mid[2]) or shoulder_mid[2]) if re else shoulder_mid[2]
-
     if le and re and vis_le > 0.25 and vis_re > 0.25:
-        left_ear  = (float(le.x), float(le.y), le_z)
-        right_ear = (float(re.x), float(re.y), re_z)
-        ear_mid   = _midpoint_3d(left_ear, right_ear)
+        left_ear  = (le.x, le.y)
+        right_ear = (re.x, re.y)
+        ear_mid   = _midpoint(left_ear, right_ear)
     elif le and vis_le > 0.25:
-        left_ear  = (float(le.x), float(le.y), le_z)
-        right_ear = (left_ear[0] + 0.15, left_ear[1], le_z)
+        left_ear  = (le.x, le.y)
+        right_ear = (left_ear[0] + 0.15, left_ear[1])
         ear_mid   = left_ear
     elif re and vis_re > 0.25:
-        right_ear = (float(re.x), float(re.y), re_z)
-        left_ear  = (right_ear[0] - 0.15, right_ear[1], re_z)
+        right_ear = (re.x, re.y)
+        left_ear  = (right_ear[0] - 0.15, right_ear[1])
         ear_mid   = right_ear
     else:
         # Fallback to nose / face center if ears are covered by headphones
         nose = lm[LM_NOSE]
-        nose_z = float(getattr(nose, "z", shoulder_mid[2]) or shoulder_mid[2])
-        ear_mid   = (float(nose.x), float(nose.y), nose_z)
-        left_ear  = (float(nose.x) - 0.08, float(nose.y), nose_z)
-        right_ear = (float(nose.x) + 0.08, float(nose.y), nose_z)
+        ear_mid   = (nose.x, nose.y)
+        left_ear  = (nose.x - 0.08, nose.y)
+        right_ear = (nose.x + 0.08, nose.y)
 
     # ── 3. Hips (Seated estimation) ──────────────────────────────────────────
     # At a computer desk, hips are often below the frame edge or behind the desk.
-    # MediaPipe estimates 3D depth and position; if off-screen, infer using anatomical prior.
+    # MediaPipe estimates their position; if off-screen, infer using anatomical prior.
     has_hips = len(lm) > LM_RIGHT_HIP
     if has_hips:
         lh = lm[LM_LEFT_HIP]
         rh = lm[LM_RIGHT_HIP]
-        lh_z = float(getattr(lh, "z", 0.0) or 0.0)
-        rh_z = float(getattr(rh, "z", 0.0) or 0.0)
-
         # Use MediaPipe's coordinates if they are reasonably valid
         if 0.0 < lh.y < 1.4 and 0.0 < rh.y < 1.4:
-            left_hip  = (float(lh.x), float(lh.y), lh_z)
-            right_hip = (float(rh.x), float(rh.y), rh_z)
-            hip_mid   = _midpoint_3d(left_hip, right_hip)
+            left_hip  = (lh.x, lh.y)
+            right_hip = (rh.x, rh.y)
+            hip_mid   = _midpoint(left_hip, right_hip)
         else:
             # Anatomical prior: hips are ~0.35 below shoulders in normalized coords
-            # Preserve MediaPipe predicted depth for frontal slouching detection
-            estimated_hip_z = (lh_z + rh_z) / 2.0
-            hip_mid   = (shoulder_mid[0], min(0.95, shoulder_mid[1] + 0.35), estimated_hip_z)
-            left_hip  = (shoulder_mid[0] - 0.10, hip_mid[1], lh_z)
-            right_hip = (shoulder_mid[0] + 0.10, hip_mid[1], rh_z)
+            hip_mid   = (shoulder_mid[0], min(0.95, shoulder_mid[1] + 0.35))
+            left_hip  = (shoulder_mid[0] - 0.10, hip_mid[1])
+            right_hip = (shoulder_mid[0] + 0.10, hip_mid[1])
     else:
-        hip_mid   = (shoulder_mid[0], min(0.95, shoulder_mid[1] + 0.35), shoulder_mid[2] + 0.05)
-        left_hip  = (shoulder_mid[0] - 0.10, hip_mid[1], hip_mid[2])
-        right_hip = (shoulder_mid[0] + 0.10, hip_mid[1], hip_mid[2])
+        hip_mid   = (shoulder_mid[0], min(0.95, shoulder_mid[1] + 0.35))
+        left_hip  = (shoulder_mid[0] - 0.10, hip_mid[1])
+        right_hip = (shoulder_mid[0] + 0.10, hip_mid[1])
 
-    # ── 4. Omnidirectional Biomechanical Angle Calculations ─────────────────
+    # ── 4. Biomechanical Angle Calculations ─────────────────────────────────
 
-    # 1. Neck Flexion (3D):
-    #    Vector from shoulder midpoint up to head/ear midpoint.
-    #    Vertical span: dy = shoulder_mid[y] - ear_mid[y]
-    #    Lateral span: dx = shoulder_mid[x] - ear_mid[x] (side view lean)
-    #    Depth span: dz = shoulder_mid[z] - ear_mid[z] (frontal forward head jut)
-    #    Upright = ~88°-90°; Forward Head = drops to 60°-75°
-    neck_flexion_deg = _angle_deg_3d(
-        vertical_span=shoulder_mid[1] - ear_mid[1],
-        horizontal_span_x=shoulder_mid[0] - ear_mid[0],
-        depth_span_z=shoulder_mid[2] - ear_mid[2],
-        depth_weight=1.4,
+    # 1. Neck Flexion:
+    #    Angle of the vector from shoulder midpoint up to head/ear midpoint.
+    #    Vertical span: dy = shoulder_mid[y] - ear_mid[y] (positive when head is above shoulders)
+    #    Horizontal span: dx = abs(shoulder_mid[x] - ear_mid[x])
+    #    Upright = ~88°-90°; Head forward protrusion = drops to 60°-75°
+    neck_flexion_deg = _angle_deg(
+        shoulder_mid[1] - ear_mid[1],
+        shoulder_mid[0] - ear_mid[0],
     )
 
-    # 2. Trunk Inclination (3D):
-    #    Vector from hip midpoint up to shoulder midpoint.
+    # 2. Trunk Inclination:
+    #    Angle of the vector from hip midpoint up to shoulder midpoint.
     #    Vertical span: dy = hip_mid[y] - shoulder_mid[y]
-    #    Lateral span: dx = hip_mid[x] - shoulder_mid[x] (side view slouch)
-    #    Depth span: dz = hip_mid[z] - shoulder_mid[z] (frontal forward slouch towards screen)
-    #    Upright = ~88°-90°; Torso Slouch = drops to 65°-78°
-    trunk_inclination_deg = _angle_deg_3d(
-        vertical_span=hip_mid[1] - shoulder_mid[1],
-        horizontal_span_x=hip_mid[0] - shoulder_mid[0],
-        depth_span_z=hip_mid[2] - shoulder_mid[2],
-        depth_weight=1.5,
+    #    Horizontal span: dx = abs(hip_mid[x] - shoulder_mid[x])
+    #    Upright = ~88°-90°; Torso forward slouch = drops to 65°-78°
+    trunk_inclination_deg = _angle_deg(
+        hip_mid[1] - shoulder_mid[1],
+        hip_mid[0] - shoulder_mid[0],
     )
 
     # 3. Shoulder Asymmetry:
